@@ -1,0 +1,76 @@
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY_CREDENTIALS_ID = 'docker-hub-credentials'
+        IMAGE_NAME              = 'ddma-disaster-response-portal'
+        DOCKER_HUB_USER         = 'yourdockerhubusername' 
+        KUBE_CONFIG_CREDENTIAL_ID = 'kubernetes-cluster-config'
+        APP_NAMESPACE           = 'emergency-operations'
+    }
+
+    stages {
+        stage('Repository Linting & Verification') {
+            steps {
+                echo 'Validating Portal HTML assets syntax integrity...'
+                sh 'grep -q "🚨 DDMA EMERGENCY PORTAL" index.html'
+            }
+        }
+
+        stage('Image Compilation & Docker Assembly') {
+            steps {
+                script {
+                    echo 'Assembling production-ready app container artifacts...'
+                    localImage = docker.build("${DOCKER_HUB_USER}/${IMAGE_NAME}:${BUILD_NUMBER}")
+                }
+            }
+        }
+
+        stage('Secure Push Image Registry') {
+            steps {
+                script {
+                    docker.withRegistry('https://docker.io', REGISTRY_CREDENTIALS_ID) {
+                        localImage.push()
+                        localImage.push('latest')
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes Cluster') {
+            steps {
+                withKubeConfig([credentialsId: KUBE_CONFIG_CREDENTIAL_ID]) {
+                    echo 'Applying current configurations to Kubernetes Engine infrastructure...'
+                    sh "sed -i 's|VERSION_PLACEHOLDER|${BUILD_NUMBER}|g' deployment.yaml"
+                    sh "kubectl apply -f deployment.yaml --namespace=${APP_NAMESPACE}"
+                }
+            }
+        }
+
+        stage('Automated Post-Deployment Verification') {
+            steps {
+                withKubeConfig([credentialsId: KUBE_CONFIG_CREDENTIAL_ID]) {
+                    echo 'Verifying rollout status...'
+                    script {
+                        try {
+                            // Give it 90 seconds to verify deployment stability
+                            sh "kubectl rollout status deployment/disaster-response-portal --namespace=${APP_NAMESPACE} --timeout=90s"
+                            echo "Deployment stable and running successfully."
+                        } catch (Exception e) {
+                            echo "⚠️ Deployment Verification Failed! Executing Automatic Emergency Rollback Rollout immediately..."
+                            sh "kubectl rollout undo deployment/disaster-response-portal --namespace=${APP_NAMESPACE}"
+                            error("Pipeline marked failed due to unstable rollout status. Self-healing mechanism has restored previous stable iteration.")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Cleaning workspace environments...'
+            cleanWs()
+        }
+    }
+}
